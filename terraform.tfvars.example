@@ -1,0 +1,101 @@
+# Terraform variables for k0rdent-poc project
+# Customize these values based on your OpenStack environment
+
+# =============================================================================
+# CORE CLUSTER CONFIGURATION
+# =============================================================================
+
+# Resource naming and cluster configuration
+resource_prefix = "poc"                    # Prefix for all resource names (e.g., 'poc', 'dev', 'prod')
+cluster_name = "k0rdent-mgmt"              # Name of the k0s cluster (will be prefixed with resource_prefix)
+controller_count = 3                       # Number of controller nodes (1-3 supported)
+worker_count = 0                           # Number of worker nodes (0-10)
+
+# =============================================================================
+# OPENSTACK CONFIGURATION
+# =============================================================================
+
+# OpenStack authentication and region
+# These will be read from environment variables (openrc.sh)
+openstack_auth_url = ""                    # OpenStack authentication URL
+openstack_region = "RegionOne"             # OpenStack region name
+
+# OpenStack SSL/TLS Configuration for self-signed certificates
+# Option 1: Skip certificate verification (testing environments)
+openstack_insecure = false                 # Skip TLS certificate verification for OpenStack API calls
+# Option 2: Provide CA certificate bundle (production environments)
+openstack_custom_ca = true                 # Enable custom CA certificate for OpenStack API calls (CCM and CSI)
+
+# =============================================================================
+# NETWORK CONFIGURATION
+# =============================================================================
+
+# External network configuration
+external_network_name = "public"           # Name of the external network for floating IPs
+openstack_services_ip = "10.130.0.66"      # IP address of OpenStack services (keystone, nova, neutron, etc.)
+
+# Cluster networking
+network_cidr = "10.0.1.0/24"               # CIDR block for the cluster network
+pod_cidr = "10.244.0.0/16"                 # CIDR block for Kubernetes pods
+service_cidr = "10.96.0.0/12"              # CIDR block for Kubernetes services
+
+# Existing network configuration
+use_existing_network = true                # Whether to use an existing network instead of creating a new one
+existing_network_name = "net-1"            # Name of the existing network to use
+existing_subnet_name = "subnet-net-1"      # Name of the existing subnet to use
+
+# DNS configuration - only applies if networks are created
+# dns_nameservers = ["10.130.18.1", "10.130.18.2"]  # DNS nameservers for the cluster subnet
+
+# =============================================================================
+# INSTANCE CONFIGURATION
+# =============================================================================
+
+# Image configuration
+image_name = "ubuntu-22.04"                # Name of the OpenStack image to use (should be in raw format)
+# image_id = ""                            # ID of the OpenStack image to use (takes precedence over image_name)
+
+# Instance flavors
+control_plane_flavor = "m1.large"          # Name of the OpenStack flavor to use for control plane nodes
+worker_flavor       = "m1.medium"          # Name of the OpenStack flavor to use for worker nodes
+bastion_flavor      = "m1.small"           # Name of the OpenStack flavor to use for bastion host
+
+# Worker node configuration
+worker_floating_ips = false                # Whether to assign floating IPs to worker nodes (typically not needed)
+
+# =============================================================================
+# STORAGE CONFIGURATION
+# =============================================================================
+
+# Volume configuration
+volume_size = 20                           # Size of the boot volume in GB
+volume_type = "purestorage-backend"        # Volume type for boot volumes
+# volume_type = ""                         # Leave empty for default volume type
+
+# =============================================================================
+# HIGH AVAILABILITY & SECURITY
+# =============================================================================
+
+# High Availability configuration
+load_balancer_enabled = true               # Whether to create a load balancer for control plane HA
+load_balancer_floating_ip_enabled = true   # Whether to assign a floating IP to the load balancer
+
+# Bastion host configuration
+bastion_enabled = true                     # Whether to create a bastion host for SSH access
+bastion_image_name = "ubuntu-22.04"        # Name of the OpenStack image to use for bastion host
+bastion_user       = "ubuntu"              # SSH user for bastion host (ubuntu for Ubuntu, cirros for CirrOS)
+
+# =============================================================================
+# NETWORKING & CNI
+# =============================================================================
+
+# CNI networking configuration
+# Cilium is configured via Helm chart in k0sctl.yaml.tpl
+# Default Cilium VXLAN MTU is auto-detected
+
+# =============================================================================
+# RESOURCE TAGGING
+# =============================================================================
+
+# Resource tags
+tags = ["k0s", "k0rdent", "mirantis", "poc"]  # Tags to apply to all resources 

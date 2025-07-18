@@ -1,0 +1,60 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfvars
+!terraform.tfvars.example
+.terraform/
+.terraform.lock.hcl
+tfplan
+crash.log
+crash.*.log
+
+# k0sctl generated files
+k0sctl.yaml
+
+# SSH keys (including generated ones)
+*.pem
+*.key
+id_rsa*
+ssh-key
+ssh-key.pub
+
+# OpenStack credentials
+*-openrc.sh
+
+# Kubernetes config
+kubeconfig
+*.kubeconfig
+
+# Temporary cloud config files
+cloud-config-*.conf
+
+# Test files
+test-*.yaml
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Backup files
+*.backup
+*.bak 
+
+# tmp folder
+tmp/
+temp/
