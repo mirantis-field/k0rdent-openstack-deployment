@@ -271,10 +271,6 @@ spec:
                     nodePlugin:
                       kubeletDir: /var/lib/k0s/kubelet
                     volumes:
-                      # Mount the existing cloud-config secret created by CCM
-                      - name: cloud-config
-                        secret:
-                          secretName: cloud-config
 %{ if openstack_config.custom_ca ~}
                       # Mount custom CA certificate
                       - name: custom-ca-cert

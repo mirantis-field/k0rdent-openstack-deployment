@@ -10,7 +10,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-K0RDENT_VERSION=${K0RDENT_VERSION:-"1.1.0-rc1"}
+K0RDENT_VERSION=${K0RDENT_VERSION:-"1.1.0-rc5"}
 K0RDENT_NAMESPACE=${K0RDENT_NAMESPACE:-"kcm-system"}
 K0RDENT_CHART_URL=${K0RDENT_CHART_URL:-"oci://registry.mirantis.com/k0rdent-enterprise/charts/k0rdent-enterprise"}
 
@@ -265,83 +265,9 @@ install_k0rdent() {
     
     # Wait for k0rdent to be ready
     print_status "Waiting for k0rdent enterprise to be ready..."
-    kubectl wait --for=condition=Available deployment/kcm-controller-manager -n ${K0RDENT_NAMESPACE} --timeout=300s
+    kubectl wait --for=condition=Available deployment/kcm-k0rdent-enterprise-controller-manager -n ${K0RDENT_NAMESPACE} --timeout=300s
     
     print_success "k0rdent enterprise is ready"
-}
-
-# Function to configure CAPO with custom CA (can be run separately)
-configure_capo_ca_only() {
-    if [[ "$OPENSTACK_CUSTOM_CA" != "true" ]]; then
-        print_status "Skipping CAPO CA configuration (openstack_custom_ca = false)"
-        return 0
-    fi
-    
-    print_status "Configuring CAPO with custom CA certificates..."
-    
-    # Ensure we're using the correct kubeconfig
-    local kubectl_cmd="kubectl --kubeconfig=${KUBECONFIG}"
-    
-    # Check if kcm-system namespace exists
-    if ! ${kubectl_cmd} get namespace ${K0RDENT_NAMESPACE} &> /dev/null; then
-        print_error "${K0RDENT_NAMESPACE} namespace not found"
-        print_status "Please ensure k0rdent enterprise is installed first"
-        return 1
-    fi
-    
-    # Check if CAPO controller exists
-    if ! ${kubectl_cmd} get deployment capo-controller-manager -n ${K0RDENT_NAMESPACE} &> /dev/null; then
-        print_error "CAPO controller not found in ${K0RDENT_NAMESPACE}"
-        print_status "Please wait for the CAPI operator to create the CAPO controller and try again"
-        print_status "Current deployments in ${K0RDENT_NAMESPACE}:"
-        ${kubectl_cmd} get deployments -n ${K0RDENT_NAMESPACE} | grep -E "(NAME|capo|controller)" || true
-        return 1
-    fi
-    
-    # Check if the volume mount already exists
-    if ${kubectl_cmd} get deployment capo-controller-manager -n ${K0RDENT_NAMESPACE} -o jsonpath='{.spec.template.spec.containers[0].volumeMounts[*].name}' | grep -q "ca-certs"; then
-        print_success "✓ CAPO controller already has CA certificate configuration"
-        return 0
-    fi
-    
-    # Ensure CA certificate secret exists in kcm-system namespace
-    if ! ${kubectl_cmd} get secret custom-ca-cert -n ${K0RDENT_NAMESPACE} &> /dev/null; then
-        print_status "Copying CA certificate secret to ${K0RDENT_NAMESPACE}..."
-        # Get the secret from kube-system and create it in kcm-system
-        ${kubectl_cmd} get secret custom-ca-cert -n kube-system -o yaml | \
-        sed "s/namespace: kube-system/namespace: ${K0RDENT_NAMESPACE}/" | \
-        ${kubectl_cmd} apply -f -
-        print_success "✓ CA certificate secret copied to ${K0RDENT_NAMESPACE}"
-    else
-        print_success "✓ CA certificate secret already exists in ${K0RDENT_NAMESPACE}"
-    fi
-    
-    # Patch the CAPO controller
-    print_status "Patching CAPO controller with custom CA..."
-    ${kubectl_cmd} patch deployment capo-controller-manager -n ${K0RDENT_NAMESPACE} --type='json' -p='[
-      {
-        "op": "add",
-        "path": "/spec/template/spec/containers/0/volumeMounts/-",
-        "value": {
-          "name": "ca-certs",
-          "mountPath": "/etc/ssl/certs/openstack-ca.crt",
-          "subPath": "ca.crt",
-          "readOnly": true
-        }
-      },
-      {
-        "op": "add",
-        "path": "/spec/template/spec/volumes/-",
-        "value": {
-          "name": "ca-certs",
-          "secret": {
-            "secretName": "custom-ca-cert"
-          }
-        }
-      }
-    ]' || true
-    
-    print_success "✓ CAPO controller configured with custom CA certificate"
 }
 
 # Function to ensure CA certificate secret exists for OpenStack
@@ -353,17 +279,47 @@ ensure_ca_certificate_secret() {
     
     print_status "Ensuring CA certificate secret exists for OpenStack..."
     
-    # Check if the existing CA secret from manifests already exists
+    # Check if the existing CA secret from manifests already exists in kube-system
     if kubectl get secret custom-ca-cert -n kube-system &> /dev/null; then
         print_success "✓ CA certificate secret 'custom-ca-cert' already exists in kube-system namespace"
     else
-        print_status "Applying CA certificate secret from manifests/secret-ca-cert.yaml..."
+        print_status "Applying CA certificate secret from manifests/secret-ca-cert.yaml to kube-system namespace..."
         
         # Apply the CA certificate secret from manifests
         if kubectl apply -f manifests/secret-ca-cert.yaml; then
-            print_success "✓ CA certificate secret created from manifests/secret-ca-cert.yaml"
+            print_success "✓ CA certificate secret created from manifests/secret-ca-cert.yaml in kube-system namespace"
         else
             print_error "Failed to create CA certificate secret from manifests"
+            exit 1
+        fi
+    fi
+    
+    # Also ensure the secret exists in kcm-system namespace
+    if kubectl get secret custom-ca-cert -n ${K0RDENT_NAMESPACE} &> /dev/null; then
+        print_success "✓ CA certificate secret 'custom-ca-cert' already exists in ${K0RDENT_NAMESPACE} namespace"
+    else
+        print_status "Creating CA certificate secret in ${K0RDENT_NAMESPACE} namespace..."
+        
+        # Decode the CA certificate for use in the secret
+        CA_CERT_DECODED=$(echo "${CA_CERT_B64}" | base64 -d)
+        
+        # Create the secret in kcm-system namespace using the decoded certificate
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: custom-ca-cert
+  namespace: ${K0RDENT_NAMESPACE}
+type: Opaque
+stringData:
+  ca.crt: |
+$(echo "${CA_CERT_DECODED}" | sed 's/^/    /')
+EOF
+        
+        if kubectl get secret custom-ca-cert -n ${K0RDENT_NAMESPACE} &> /dev/null; then
+            print_success "✓ CA certificate secret created in ${K0RDENT_NAMESPACE} namespace"
+        else
+            print_error "Failed to create CA certificate secret in ${K0RDENT_NAMESPACE} namespace"
             exit 1
         fi
     fi
@@ -388,60 +344,12 @@ create_credential_object() {
     # First create a secret with clouds.yaml format that the template expects
     print_status "Creating OpenStack credentials secret in clouds.yaml format..."
     
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: openstack-identity-secret
-  namespace: kube-system
-  labels:
-    k0rdent.mirantis.com/component: "kcm"
-type: Opaque
-stringData:
-  clouds.yaml: |
-    clouds:
-      openstack:
-        auth:
-          auth_url: "${OS_AUTH_URL}"
-          application_credential_id: "${OS_APPLICATION_CREDENTIAL_ID}"
-          application_credential_secret: "${OS_APPLICATION_CREDENTIAL_SECRET}"
-        region_name: "${OS_REGION_NAME}"
-        interface: "public"
-        identity_api_version: "3"${OPENSTACK_CUSTOM_CA:+"
-        cacert: \"/etc/ssl/certs/openstack-ca.crt\"
-        verify: true"}
-EOF
-    
-    print_success "OpenStack credentials secret created"
-    
-    # Now create the credential object pointing to the clouds.yaml secret
-    cat <<EOF | kubectl apply -f -
-apiVersion: k0rdent.mirantis.com/v1beta1
-kind: Credential
-metadata:
-  name: openstack-cluster-identity-cred
-  namespace: ${K0RDENT_NAMESPACE}
-  labels:
-    k0rdent.mirantis.com/component: "kcm"
-spec:
-  description: "OpenStack credentials for ${CLUSTER_NAME}"
-  identityRef:
-    apiVersion: v1
-    kind: Secret
-    name: openstack-identity-secret
-    namespace: kube-system
-EOF
-    
-    print_success "k0rdent credential object created"
-}
-
-# Function to create CAPO cloud config secret
-create_capo_cloud_config() {
-    print_status "Creating OpenStack cloud config secret for CAPO..."
-    
-    # CAPO expects the openstack-cloud-config secret in the same namespace as the OpenStackCluster
-    # This is typically kcm-system namespace, not kube-system where the template creates it
-    cat <<EOF | kubectl apply -f -
+    # Create the clouds.yaml content conditionally
+    if [[ "$OPENSTACK_CUSTOM_CA" == "true" ]]; then
+        # Decode the CA certificate from base64
+        CA_CERT_DECODED=$(echo "${CA_CERT_B64}" | base64 -d)
+        
+        cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Secret
 metadata:
@@ -460,21 +368,57 @@ stringData:
           application_credential_secret: "${OS_APPLICATION_CREDENTIAL_SECRET}"
         region_name: "${OS_REGION_NAME}"
         interface: "public"
-        identity_api_version: "3"${OPENSTACK_CUSTOM_CA:+"
-        cacert: \"/etc/ssl/certs/openstack-ca.crt\"
-        verify: true"}
-  cloud.conf: |
-    [Global]
-    auth-url="${OS_AUTH_URL}"
-    application-credential-id="${OS_APPLICATION_CREDENTIAL_ID}"
-    application-credential-secret="${OS_APPLICATION_CREDENTIAL_SECRET}"
-    region="${OS_REGION_NAME}"${OPENSTACK_CUSTOM_CA:+"
-    ca-file=/etc/ssl/certs/openstack-ca.crt"}
-    [LoadBalancer]
-    [Networking]
+        identity_api_version: "3"
+        cacert: |
+$(echo "${CA_CERT_DECODED}" | sed 's/^/          /')
+  cacert: |
+$(echo "${CA_CERT_DECODED}" | sed 's/^/          /')
+EOF
+    else
+        cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openstack-cloud-config
+  namespace: ${K0RDENT_NAMESPACE}
+  labels:
+    k0rdent.mirantis.com/component: "kcm"
+type: Opaque
+stringData:
+  clouds.yaml: |
+    clouds:
+      openstack:
+        auth:
+          auth_url: "${OS_AUTH_URL}"
+          application_credential_id: "${OS_APPLICATION_CREDENTIAL_ID}"
+          application_credential_secret: "${OS_APPLICATION_CREDENTIAL_SECRET}"
+        region_name: "${OS_REGION_NAME}"
+        interface: "public"
+        identity_api_version: "3"
+EOF
+    fi
+    
+    print_success "OpenStack credentials secret created"
+    
+    # Now create the credential object pointing to the clouds.yaml secret
+    cat <<EOF | kubectl apply -f -
+apiVersion: k0rdent.mirantis.com/v1beta1
+kind: Credential
+metadata:
+  name: openstack-cluster-identity-cred
+  namespace: ${K0RDENT_NAMESPACE}
+  labels:
+    k0rdent.mirantis.com/component: "kcm"
+spec:
+  description: "OpenStack credentials for ${CLUSTER_NAME}"
+  identityRef:
+    apiVersion: v1
+    kind: Secret
+    name: openstack-cloud-config
+    namespace: ${K0RDENT_NAMESPACE}
 EOF
     
-    print_success "CAPO cloud config secret created in ${K0RDENT_NAMESPACE}"
+    print_success "k0rdent credential object created"
 }
 
 # Function to create ConfigMap resource template with CA certificate
@@ -495,21 +439,28 @@ data:
   configmap.yaml: |
     {{- $cluster := .InfrastructureProvider -}}
     {{- $identity := (getResource "InfrastructureProviderIdentity") -}}
+
     {{- $clouds := fromYaml (index $identity "data" "clouds.yaml" | b64dec) -}}
     {{- if not $clouds }}
       {{ fail "failed to decode clouds.yaml" }}
     {{ end -}}
+
     {{- $openstack := index $clouds "clouds" "openstack" -}}
+
     {{- if not (hasKey $openstack "auth") }}
       {{ fail "auth key not found in openstack config" }}
     {{- end }}
     {{- $auth := index $openstack "auth" -}}
+
     {{- $auth_url := index $auth "auth_url" -}}
     {{- $app_cred_id := index $auth "application_credential_id" -}}
     {{- $app_cred_name := index $auth "application_credential_name" -}}
     {{- $app_cred_secret := index $auth "application_credential_secret" -}}
+
     {{- $network_id := $cluster.status.externalNetwork.id -}}
     {{- $network_name := $cluster.status.externalNetwork.name -}}
+
+    {{- $ca_cert := index $identity "data" "cacert" -}}
     ---
     apiVersion: v1
     kind: Secret
@@ -521,152 +472,53 @@ data:
       cloud.conf: |
         [Global]
         auth-url="{{ $auth_url }}"
+
         {{- if $app_cred_id }}
         application-credential-id="{{ $app_cred_id }}"
         {{- end }}
+
         {{- if $app_cred_name }}
         application-credential-name="{{ $app_cred_name }}"
         {{- end }}
+
         {{- if $app_cred_secret }}
         application-credential-secret="{{ $app_cred_secret }}"
         {{- end }}
+
         {{- if and (not $app_cred_id) (not $app_cred_secret) }}
         username="{{ index $openstack "username" }}"
         password="{{ index $openstack "password" }}"
         {{- end }}
+
         region="{{ index $openstack "region_name" }}"
-        ${OPENSTACK_CUSTOM_CA:+'# Custom CA certificate configuration
-        ca-file=/etc/ssl/certs/openstack-ca.crt'}
+
+        {{- if $ca_cert }}
+        ca-file=/etc/cacert/ca.crt
+        {{- end }}
+
         [LoadBalancer]
         {{- if $network_id }}
         floating-network-id="{{ $network_id }}"
         {{- end }}
+
         [Networking]
         {{- if $network_name }}
         public-network-name="{{ $network_name }}"
         {{- end }}
-      # Include the CA certificate in the secret
-      clouds.yaml: |
-        clouds:
-          openstack:
-            auth:
-              auth_url: "{{ $auth_url }}"
-              {{- if $app_cred_id }}
-              application_credential_id: "{{ $app_cred_id }}"
-              {{- end }}
-              {{- if $app_cred_name }}
-              application_credential_name: "{{ $app_cred_name }}"
-              {{- end }}
-              {{- if $app_cred_secret }}
-              application_credential_secret: "{{ $app_cred_secret }}"
-              {{- end }}
-              {{- if and (not $app_cred_id) (not $app_cred_secret) }}
-              username: "{{ index $openstack "username" }}"
-              password: "{{ index $openstack "password" }}"
-              {{- end }}
-            region_name: "{{ index $openstack "region_name" }}"
-            interface: "{{ index $openstack "interface" | default "public" }}"
-            identity_api_version: "{{ index $openstack "identity_api_version" | default "3" }}"
-            ${OPENSTACK_CUSTOM_CA:+'# Custom CA certificate configuration for CAPO
-            cacert: /etc/ssl/certs/openstack-ca.crt
-            verify: true'}
+    {{- if $ca_cert }}
+    ---
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: openstack-ca-cert
+      namespace: kube-system
+    type: Opaque
+    data:
+      ca.crt: "{{ $ca_cert }}"
+    {{- end }}
 EOF
     
     print_success "ConfigMap resource template created with CA certificate support"
-}
-
-# Function to create CAPO configuration with custom CA
-create_capo_ca_config() {
-    if [[ "$OPENSTACK_CUSTOM_CA" != "true" ]]; then
-        print_status "Skipping CAPO CA configuration (openstack_custom_ca = false)"
-        return 0
-    fi
-    
-    print_status "Creating CAPO configuration with custom CA certificate..."
-    
-    # Ensure CA certificate secret is available for CAPO
-    # k0rdent enterprise puts CAPO in kcm-system namespace
-    if ! kubectl get namespace ${K0RDENT_NAMESPACE} &> /dev/null; then
-        print_warning "k0rdent namespace ${K0RDENT_NAMESPACE} not found. CA secret will be copied when k0rdent is installed."
-        return 0
-    fi
-    
-    # Check if secret already exists in kcm-system
-    if kubectl get secret custom-ca-cert -n ${K0RDENT_NAMESPACE} &> /dev/null; then
-        print_success "✓ CAPO CA secret already exists in ${K0RDENT_NAMESPACE}"
-    else
-        print_status "Copying CA certificate secret to ${K0RDENT_NAMESPACE}..."
-        # Copy the secret from kube-system to kcm-system
-        kubectl get secret custom-ca-cert -n kube-system -o yaml | \
-        sed "s/namespace: kube-system/namespace: ${K0RDENT_NAMESPACE}/" | \
-        kubectl apply -f -
-        print_success "✓ CAPO CA secret copied to ${K0RDENT_NAMESPACE}"
-    fi
-
-    # Wait for and patch the CAPO controller deployment to use the custom CA
-    print_status "Waiting for CAPO controller to be deployed..."
-    
-    # Wait up to 5 minutes for CAPO controller to be created
-    local wait_timeout=300
-    local wait_interval=10
-    local elapsed=0
-    
-    while [[ $elapsed -lt $wait_timeout ]]; do
-        if kubectl get deployment capo-controller-manager -n ${K0RDENT_NAMESPACE} &> /dev/null; then
-            print_success "✓ CAPO controller found, proceeding with CA configuration"
-            break
-        fi
-        
-        if [[ $elapsed -eq 0 ]]; then
-            print_status "CAPO controller not ready yet, waiting for CAPI operator to create it..."
-        fi
-        
-        sleep $wait_interval
-        elapsed=$((elapsed + wait_interval))
-        
-        if [[ $((elapsed % 60)) -eq 0 ]]; then
-            print_status "Still waiting for CAPO controller... (${elapsed}s elapsed)"
-        fi
-    done
-    
-    # Check if CAPO controller exists now
-    if kubectl get deployment capo-controller-manager -n ${K0RDENT_NAMESPACE} &> /dev/null; then
-        print_status "Patching CAPO controller to use custom CA..."
-        
-        # Check if the volume mount already exists
-        if kubectl get deployment capo-controller-manager -n ${K0RDENT_NAMESPACE} -o jsonpath='{.spec.template.spec.containers[0].volumeMounts[*].name}' | grep -q "ca-certs"; then
-            print_success "✓ CAPO controller already has CA certificate configuration"
-        else
-            kubectl patch deployment capo-controller-manager -n ${K0RDENT_NAMESPACE} --type='json' -p='[
-              {
-                "op": "add",
-                "path": "/spec/template/spec/containers/0/volumeMounts/-",
-                "value": {
-                  "name": "ca-certs",
-                  "mountPath": "/etc/ssl/certs/openstack-ca.crt",
-                  "subPath": "ca.crt",
-                  "readOnly": true
-                }
-              },
-              {
-                "op": "add",
-                "path": "/spec/template/spec/volumes/-",
-                "value": {
-                  "name": "ca-certs",
-                  "secret": {
-                    "secretName": "custom-ca-cert"
-                  }
-                }
-              }
-            ]' || true
-            
-            print_success "✓ CAPO controller patched with custom CA certificate"
-        fi
-    else
-        print_warning "⚠ CAPO controller still not found after ${wait_timeout}s"
-        print_warning "  This is normal for initial deployments. You can configure CAPO later by running:"
-        print_warning "  $0 --configure-capo-only"
-    fi
 }
 
 # Function to verify the setup
@@ -785,7 +637,9 @@ spec:
       name: "openstack-cloud-config"
       cloudName: "openstack"
       region: ${OS_REGION_NAME}
-    # Custom CA certificate support is automatically configured
+      caCert:
+        secretName: "custom-ca-cert"
+        path: /etc/cacert
 EOF
     echo
     echo "5. Monitor deployment:"
@@ -827,14 +681,12 @@ main() {
     check_kcm_namespace
     install_k0rdent
     ensure_ca_certificate_secret
-    create_capo_ca_config
     
     echo
     print_status "Creating k0rdent OpenStack resources..."
     
     # Create resources
     create_credential_object
-    create_capo_cloud_config
     create_resource_template
     
     echo
@@ -877,7 +729,6 @@ USAGE:
 
 OPTIONS:
     -h, --help               Show this help message
-    --configure-capo-only    Only configure CAPO with custom CA (run after CAPO is deployed)
 
 EXAMPLE:
     # Apply Terraform configuration first
